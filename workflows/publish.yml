@@ -1,0 +1,94 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 1.2.0)'
+        required: true
+
+jobs:
+  publish-mac:
+    name: macOS (signed + notarized)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: app
+
+      # Decode the exported Developer ID certificate (.p12) and install it
+      # to the temporary keychain so electron-forge / codesign can find it.
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          echo "$MACOS_CERTIFICATE" | base64 --decode -o $RUNNER_TEMP/certificate.p12
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          security import $RUNNER_TEMP/certificate.p12 \
+            -k $KEYCHAIN_PATH \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Allow codesign to use the key without a UI prompt
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+      - name: Bump version
+        run: |
+          cd app
+          bun x json -I -f package.json -e "this.version='${{ github.event.inputs.version }}'"
+
+      - name: Build & publish (macOS)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bun run publish
+        working-directory: app
+
+      - name: Clean up keychain
+        if: always()
+        run: security delete-keychain $RUNNER_TEMP/build.keychain || true
+
+  publish-windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: app
+
+      - name: Bump version
+        shell: bash
+        run: |
+          cd app
+          bun x json -I -f package.json -e "this.version='${{ github.event.inputs.version }}'"
+
+      - name: Build & publish (Windows)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
+        run: bun run publish
+        working-directory: app
